@@ -21,18 +21,22 @@ import {
   ServerCrash,
 } from "lucide-react"
 import { memo, useEffect, useMemo } from "react"
+import { useShallow } from "zustand/react/shallow"
 
+import { useServiceVisualStatuses } from "@/context/ServiceVisualStatusContext"
+import { mapServiceHealthToGraphProps } from "@/lib/serviceHealthView"
+import {
+  matchDependencyGraphServiceId,
+  normalizeServiceId,
+} from "@/lib/serviceIdNormalize"
 import { cn } from "@/lib/utils"
+import { useDashboardStore } from "@/store/useDashboardStore"
 import type {
   DependencyGraphServiceId,
   DependencyGraphStatus,
 } from "@/types"
 
 export type ServiceDependencyGraphProps = {
-  /** Live status per service — drives color, edge animation, and pulse. */
-  statuses?: Partial<Record<DependencyGraphServiceId, DependencyGraphStatus>>
-  /** Optional latency (ms) shown on each node. */
-  latenciesMs?: Partial<Record<DependencyGraphServiceId, number>>
   className?: string
   /** Canvas height in px */
   height?: number
@@ -62,21 +66,6 @@ const EDGES: {
   { id: "pay-inv", source: "payment_service", target: "inventory_service" },
 ]
 
-const DEFAULT_STATUSES: Record<DependencyGraphServiceId, DependencyGraphStatus> =
-  {
-    api_gateway: "healthy",
-    order_service: "degraded",
-    payment_service: "critical",
-    inventory_service: "recovering",
-  }
-
-const DEFAULT_LATENCIES: Record<DependencyGraphServiceId, number> = {
-  api_gateway: 38,
-  order_service: 812,
-  payment_service: 3200,
-  inventory_service: 156,
-}
-
 const NODE_X_GAP = 200
 
 type ServiceNodeData = {
@@ -105,18 +94,18 @@ function StatusIcon({ status }: { status: DependencyGraphStatus }) {
 const ServiceNodeInner = memo(function ServiceNodeInner({
   data,
 }: NodeProps<ServiceGraphNode>) {
-  const { label, status, latencyMs, isFailureOrigin } = data
+  const { label, status: visualStatus, latencyMs, isFailureOrigin } = data
 
   return (
     <div
       className={cn(
-        "relative min-w-[148px] rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-all duration-300",
-        status === "healthy" && "border-border ring-1 ring-border/80",
-        status === "degraded" &&
+        "relative min-w-[148px] rounded-xl border bg-card px-3 py-2.5 shadow-sm transition-all duration-700 ease-in-out",
+        visualStatus === "healthy" && "border-border ring-1 ring-border/80",
+        visualStatus === "degraded" &&
           "border-amber-500/40 bg-amber-500/[0.06] ring-1 ring-amber-500/25",
-        status === "critical" &&
-          "border-red-500/50 bg-red-500/[0.1] ring-2 ring-red-500/40 shadow-[0_0_24px_-6px_rgb(239_68_68/0.45)]",
-        status === "recovering" &&
+        visualStatus === "critical" &&
+          "border-red-500/50 bg-red-500/[0.1] ring-2 ring-red-500/40 shadow-[0_0_24px_-6px_rgb(239_68_68/0.45)] motion-safe:animate-pulse motion-reduce:animate-none",
+        visualStatus === "recovering" &&
           "border-sky-500/35 bg-sky-500/[0.06] ring-1 ring-sky-500/25",
         isFailureOrigin && "dependency-graph-node--pulse",
       )}
@@ -127,7 +116,7 @@ const ServiceNodeInner = memo(function ServiceNodeInner({
         className="!size-2 !border-border !bg-muted !opacity-0 [&+span]:hidden"
       />
       <div className="flex items-start gap-2">
-        <StatusIcon status={status} />
+        <StatusIcon status={visualStatus} />
         <div className="min-w-0 flex-1">
           <p className="text-xs font-semibold leading-tight text-foreground">
             {label}
@@ -139,13 +128,13 @@ const ServiceNodeInner = memo(function ServiceNodeInner({
           <p
             className={cn(
               "mt-1 text-[10px] font-medium capitalize",
-              status === "healthy" && "text-emerald-400/90",
-              status === "degraded" && "text-amber-400/90",
-              status === "critical" && "text-red-400/90",
-              status === "recovering" && "text-sky-400/90",
+              visualStatus === "healthy" && "text-emerald-400/90",
+              visualStatus === "degraded" && "text-amber-400/90",
+              visualStatus === "critical" && "text-red-400/90",
+              visualStatus === "recovering" && "text-sky-400/90",
             )}
           >
-            {status.replace("_", " ")}
+            {visualStatus.replace("_", " ")}
           </p>
         </div>
       </div>
@@ -162,32 +151,55 @@ const nodeTypes = {
   service: ServiceNodeInner,
 }
 
-function resolveStatuses(
-  input?: Partial<Record<DependencyGraphServiceId, DependencyGraphStatus>>,
-): Record<DependencyGraphServiceId, DependencyGraphStatus> {
-  return { ...DEFAULT_STATUSES, ...input }
+/** Request path order (upstream → downstream); used when inferring origin without RCA. */
+const CHAIN_ORDER: DependencyGraphServiceId[] = [
+  "api_gateway",
+  "order_service",
+  "payment_service",
+  "inventory_service",
+]
+
+/** Node colors from GET /api/rca → `currentIncident` only (chain index: root = critical, downstream = degraded, upstream = healthy). */
+function statusesFromCurrentIncident(incident: {
+  service: string
+}): Record<DependencyGraphServiceId, DependencyGraphStatus> | null {
+  const root = normalizeServiceId(incident.service)
+  if (!root) return null
+  const rootIndex = CHAIN_ORDER.findIndex(
+    (id) => normalizeServiceId(id) === root,
+  )
+  if (rootIndex === -1) return null
+  const out = {} as Record<DependencyGraphServiceId, DependencyGraphStatus>
+  CHAIN_ORDER.forEach((id, index) => {
+    const isRoot = normalizeServiceId(id) === root
+    const isAffected = rootIndex !== -1 && index >= rootIndex
+    out[id] = isRoot ? "critical" : isAffected ? "degraded" : "healthy"
+  })
+  return out
 }
 
-function resolveLatencies(
-  input?: Partial<Record<DependencyGraphServiceId, number>>,
-): Record<DependencyGraphServiceId, number> {
-  return { ...DEFAULT_LATENCIES, ...input }
-}
-
-/** First service in call chain that is critical (root cause), else worst degraded. */
-function failureOriginId(
+/** When no `currentIncident`, infer origin from API-derived statuses (chain order). */
+function resolveFailureOrigin(
   statuses: Record<DependencyGraphServiceId, DependencyGraphStatus>,
+  rootHint: string | undefined | null,
 ): DependencyGraphServiceId | null {
-  const order: DependencyGraphServiceId[] = [
-    "payment_service",
-    "order_service",
-    "api_gateway",
-    "inventory_service",
-  ]
-  const critical = order.find((id) => statuses[id] === "critical")
+  const rca = matchDependencyGraphServiceId(rootHint)
+  if (rca != null) {
+    const st = statuses[rca]
+    if (st === "critical" || st === "degraded") {
+      return rca
+    }
+    const anyIncident = CHAIN_ORDER.some(
+      (id) => statuses[id] === "critical" || statuses[id] === "degraded",
+    )
+    if (anyIncident) {
+      return rca
+    }
+  }
+  const critical = CHAIN_ORDER.find((id) => statuses[id] === "critical")
   if (critical) return critical
   return (
-    order.find((id) => statuses[id] === "degraded") ??
+    CHAIN_ORDER.find((id) => statuses[id] === "degraded") ??
     (Object.entries(statuses).find(([, s]) => s === "degraded")?.[0] as
       | DependencyGraphServiceId
       | undefined) ??
@@ -265,50 +277,120 @@ function buildEdges(
 function FitViewEffect({ layoutKey }: { layoutKey: string }) {
   const { fitView } = useReactFlow()
   useEffect(() => {
-    fitView({ padding: 0.2, duration: 280 })
+    const id = requestAnimationFrame(() => {
+      void fitView({ padding: 0.2, duration: 280 })
+    })
+    return () => cancelAnimationFrame(id)
   }, [fitView, layoutKey])
   return null
 }
 
-function GraphCanvas({
-  statuses: statusesProp,
-  latenciesMs: latenciesProp,
-  className,
-  height = 280,
-}: ServiceDependencyGraphProps) {
-  const statuses = useMemo(
-    () => resolveStatuses(statusesProp),
-    [statusesProp],
+function GraphCanvas({ className, height = 280 }: ServiceDependencyGraphProps) {
+  const servicesStatus = useDashboardStore(
+    useShallow((s) => s.servicesStatus),
   )
-  const latencies = useMemo(
-    () => resolveLatencies(latenciesProp),
-    [latenciesProp],
-  )
+  const currentIncident = useDashboardStore((s) => s.currentIncident)
 
-  const origin = useMemo(() => failureOriginId(statuses), [statuses])
+  const graphReady = useMemo(() => {
+    if (!servicesStatus?.services?.length) {
+      return null as
+        | null
+        | {
+            statuses: Record<DependencyGraphServiceId, DependencyGraphStatus>
+            latencies: Record<DependencyGraphServiceId, number>
+          }
+    }
+    const { statuses, latenciesMs } = mapServiceHealthToGraphProps(
+      servicesStatus.services,
+    )
+    return { statuses, latencies: latenciesMs }
+  }, [servicesStatus])
 
-  const layoutKey = useMemo(
-    () =>
-      `${SERVICE_IDS.map((id) => `${id}:${statuses[id]}:${latencies[id]}`).join("|")}|${origin}`,
-    [statuses, latencies, origin],
-  )
+  const statuses = graphReady?.statuses ?? null
+  const latencies = graphReady?.latencies ?? null
 
-  const initialNodes = useMemo(
-    () => buildNodes(statuses, latencies, origin),
-    [statuses, latencies, origin],
-  )
-  const initialEdges = useMemo(
-    () => buildEdges(statuses, origin),
-    [statuses, origin],
-  )
+  const stabilizedFromContext = useServiceVisualStatuses()
+  const displayStatuses = useMemo(() => {
+    if (!statuses) return null
+    return stabilizedFromContext ?? statuses
+  }, [statuses, stabilizedFromContext])
+
+  const statusesForGraph = useMemo(() => {
+    if (!displayStatuses) return null
+    if (currentIncident?.service) {
+      const fromIncident = statusesFromCurrentIncident(currentIncident)
+      if (fromIncident) return fromIncident
+    }
+    return displayStatuses
+  }, [displayStatuses, currentIncident])
+
+  const origin = useMemo(() => {
+    if (!statusesForGraph) return null
+    if (currentIncident?.service) {
+      return matchDependencyGraphServiceId(currentIncident.service)
+    }
+    return resolveFailureOrigin(statusesForGraph, null)
+  }, [statusesForGraph, currentIncident])
+
+  const layoutKey = useMemo(() => {
+    if (!statusesForGraph || !latencies) return "empty"
+    return `${SERVICE_IDS.map((id) => `${id}:${statusesForGraph[id]}:${latencies[id]}`).join("|")}|${origin ?? ""}|ci:${currentIncident?.service ?? ""}`
+  }, [statusesForGraph, latencies, origin, currentIncident?.service])
+
+  const initialNodes = useMemo(() => {
+    if (!statusesForGraph || !latencies) return [] as Node<ServiceNodeData, "service">[]
+    return buildNodes(statusesForGraph, latencies, origin)
+  }, [statusesForGraph, latencies, origin])
+
+  const initialEdges = useMemo(() => {
+    if (!statusesForGraph) return [] as Edge[]
+    return buildEdges(statusesForGraph, origin)
+  }, [statusesForGraph, origin])
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
 
   useEffect(() => {
-    setNodes(buildNodes(statuses, latencies, origin))
-    setEdges(buildEdges(statuses, origin))
-  }, [statuses, latencies, origin, setNodes, setEdges])
+    if (!statusesForGraph || !latencies) {
+      setNodes([])
+      setEdges([])
+      return
+    }
+    setNodes(buildNodes(statusesForGraph, latencies, origin))
+    setEdges(buildEdges(statusesForGraph, origin))
+  }, [statusesForGraph, latencies, origin, setNodes, setEdges])
+
+  if (servicesStatus === null) {
+    return (
+      <div
+        className={cn(
+          "flex flex-col items-center justify-center gap-3 overflow-hidden rounded-2xl border border-white/[0.08] bg-[hsl(222_28%_6%/0.85)] px-4 text-center text-sm text-muted-foreground shadow-elevation-sm backdrop-blur-xl",
+          className,
+        )}
+        style={{ height }}
+      >
+        <Loader2
+          className="size-8 animate-spin text-muted-foreground"
+          aria-hidden
+        />
+        <span>Loading service topology…</span>
+      </div>
+    )
+  }
+
+  if (!servicesStatus.services.length) {
+    return (
+      <div
+        className={cn(
+          "flex items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border bg-[hsl(222_28%_6%/0.5)] px-4 text-center text-sm text-muted-foreground shadow-elevation-sm",
+          className,
+        )}
+        style={{ height }}
+      >
+        No topology data from the orchestrator yet.
+      </div>
+    )
+  }
 
   return (
     <div

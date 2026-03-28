@@ -5,10 +5,21 @@ import type {
   MetricsSeriesPoint,
   OrchestratorLogEntry,
   OrchestratorTimelineEvent,
-  ServiceHealth,
   ServicesStatusResponse,
   SystemStatusApi,
 } from "@/types"
+
+/** Local dev URLs for direct service toggles (`/toggle-failure`). Docker maps these ports. */
+export const SERVICE_TOGGLE_ORIGINS: Record<string, string> = {
+  api_gateway:
+    import.meta.env.VITE_API_GATEWAY_URL ?? "http://localhost:8000",
+  order_service:
+    import.meta.env.VITE_ORDER_SERVICE_URL ?? "http://localhost:8001",
+  payment_service:
+    import.meta.env.VITE_PAYMENT_SERVICE_URL ?? "http://localhost:8002",
+  inventory_service:
+    import.meta.env.VITE_INVENTORY_SERVICE_URL ?? "http://localhost:8003",
+}
 
 /** Axios instance for the orchestrator at http://localhost:9000 */
 export const API = axios.create({
@@ -24,7 +35,8 @@ export const apiClient = API
 export const getSystemStatus = () =>
   API.get<SystemStatusApi>("/api/system-status")
 
-export const getInsights = () => API.get<InsightsApi>("/api/insights")
+/** RCA payload (`GET /api/rca`). */
+export const getInsights = () => API.get<InsightsApi>("/api/rca")
 
 export const getTimeline = () =>
   API.get<{ events: OrchestratorTimelineEvent[] }>("/api/timeline")
@@ -44,78 +56,58 @@ export type OrchestratorMutationResult = {
   note?: string
 }
 
-const envMockDefault = import.meta.env.VITE_API_USE_MOCK === "true"
-
-let mockOverride: boolean | undefined
-
-/** Read-only: mock is on when `VITE_API_USE_MOCK=true` unless overridden. */
-export function isApiMockEnabled(): boolean {
-  return mockOverride ?? envMockDefault
-}
-
-/** Toggle mock mode at runtime (`undefined` restores env default). */
-export function setApiMockEnabled(enabled: boolean | undefined): void {
-  mockOverride = enabled
-}
-
-const MOCK_STATUS: ServicesStatusResponse = {
-  services: [
-    {
-      name: "api_gateway",
-      status: "healthy",
-      latency_ms: 42,
-      error: false,
-      anomaly_score: 0.12,
-    },
-    {
-      name: "order_service",
-      status: "degraded",
-      latency_ms: 240,
-      error: false,
-      anomaly_score: 0.48,
-    },
-    {
-      name: "payment_service",
-      status: "critical",
-      latency_ms: 1200,
-      error: true,
-      anomaly_score: 0.9,
-    },
-    {
-      name: "inventory_service",
-      status: "healthy",
-      latency_ms: 88,
-      error: false,
-      anomaly_score: 0.15,
-    },
-  ] satisfies ServiceHealth[],
-  rca_text:
-    "Payment Service failure detected. Order Service likely impacted.",
-}
-
 export async function getServicesStatus(): Promise<ServicesStatusResponse> {
-  if (isApiMockEnabled()) {
-    return structuredClone(MOCK_STATUS)
-  }
   const { data } = await API.get<ServicesStatusResponse>(
     "/api/services/status",
   )
   return data
 }
 
+export type ToggleFailureResult = {
+  service: string
+  status?: string
+  fail_mode?: boolean
+}
+
+/** POST `{origin}/toggle-failure?service={service}` on the target microservice. */
+export async function postToggleFailure(
+  service: string,
+): Promise<ToggleFailureResult> {
+  const origin = SERVICE_TOGGLE_ORIGINS[service]
+  if (!origin) {
+    throw new Error(`Unknown service for toggle: ${service}`)
+  }
+  const { data } = await axios.post<ToggleFailureResult>(
+    `${origin}/toggle-failure`,
+    null,
+    {
+      params: { service },
+      timeout: 15_000,
+    },
+  )
+  return data
+}
+
+/** POST orchestrator `/api/toggle-failure` — sets global RCA + toggles the target microservice. */
+export async function orchestratorToggleFailure(
+  service: string,
+): Promise<OrchestratorMutationResult> {
+  const { data } = await API.post<OrchestratorMutationResult>(
+    "/api/toggle-failure",
+    null,
+    {
+      params: { service },
+      timeout: 15_000,
+    },
+  )
+  return data
+}
+
 export async function injectFailure(
   service: string,
-  type: string,
+  _type: string,
 ): Promise<OrchestratorMutationResult> {
-  if (isApiMockEnabled()) {
-    return {
-      success: true,
-      service,
-      mttr_ms: 16,
-      fail_mode: true,
-      note: `[mock] failure_type=${type}`,
-    }
-  }
+  void _type
   const { data } = await API.post<OrchestratorMutationResult>(
     "/api/inject-failure",
     { service },
@@ -126,14 +118,6 @@ export async function injectFailure(
 export async function autoFix(
   service: string,
 ): Promise<OrchestratorMutationResult> {
-  if (isApiMockEnabled()) {
-    return {
-      success: true,
-      service,
-      mttr_ms: 52,
-      fail_mode: false,
-    }
-  }
   const { data } = await API.post<OrchestratorMutationResult>(
     "/api/auto-fix",
     { service },

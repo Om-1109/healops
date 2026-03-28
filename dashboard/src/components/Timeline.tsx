@@ -1,10 +1,20 @@
 import { AlertTriangle, Brain, CheckCircle, Wrench } from "lucide-react"
 import { useMemo } from "react"
+import { useShallow } from "zustand/react/shallow"
 
+import { formatServiceLabel } from "@/lib/logStreamUtils"
 import { cn } from "@/lib/utils"
-import type { TimelineEvent, TimelineEventType } from "@/types"
+import { useDashboardStore } from "@/store/useDashboardStore"
+import type { TimelineEventType } from "@/types"
 
 export type { TimelineEvent, TimelineEventType } from "@/types"
+
+const EVENT_TYPE_TO_ICON: Record<string, TimelineEventType> = {
+  failure_injected: "alert",
+  anomaly_detected: "anomaly",
+  remediation_started: "fix",
+  remediation_complete: "success",
+}
 
 const iconMap: Record<
   TimelineEventType,
@@ -42,27 +52,27 @@ function formatEventTime(iso: string): string {
   }).format(d)
 }
 
-function sortNewestFirst(events: TimelineEvent[]): TimelineEvent[] {
-  return [...events].sort(
-    (a, b) => new Date(b.at).getTime() - new Date(a.at).getTime(),
-  )
-}
-
 export type TimelineProps = {
-  events: TimelineEvent[]
   className?: string
   /** Stagger between rows in ms (fade-in). */
   staggerMs?: number
 }
 
-export function Timeline({
-  events,
-  className,
-  staggerMs = 70,
-}: TimelineProps) {
-  const sorted = useMemo(() => sortNewestFirst(events), [events])
+export function Timeline({ className, staggerMs = 70 }: TimelineProps) {
+  const timeline = useDashboardStore(useShallow((s) => s.timeline))
 
-  if (sorted.length === 0) {
+  const sortedTimeline = useMemo(() => {
+    const safeTimeline = Array.isArray(timeline) ? timeline : []
+    return [...safeTimeline].sort((a, b) => {
+      const t1 = new Date(a?.timestamp || 0).getTime()
+      const t2 = new Date(b?.timestamp || 0).getTime()
+      const n1 = Number.isFinite(t1) ? t1 : 0
+      const n2 = Number.isFinite(t2) ? t2 : 0
+      return n2 - n1
+    })
+  }, [timeline])
+
+  if (sortedTimeline.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
         No events yet.
@@ -77,11 +87,16 @@ export function Timeline({
         aria-hidden
       />
       <ul className="relative space-y-0" role="list">
-        {sorted.map((event, index) => {
-          const { Icon, className: iconClass } = iconMap[event.type]
+        {sortedTimeline.map((event, index) => {
+          const iconKind = EVENT_TYPE_TO_ICON[event.type] ?? "anomaly"
+          const { Icon, className: iconClass } = iconMap[iconKind]
+          const serviceLabel =
+            event.service != null && event.service.trim() !== ""
+              ? formatServiceLabel(event.service)
+              : "—"
           return (
             <li
-              key={event.id}
+              key={`${event.timestamp}-${index}-${event.type}`}
               className="animate-timeline-enter"
               style={{
                 animationDelay: `${index * staggerMs}ms`,
@@ -97,18 +112,18 @@ export function Timeline({
                 <div className="min-w-0 flex-1 pt-0.5">
                   <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                      <span className="font-semibold leading-tight text-foreground">
-                        {event.description}
+                      <span className="font-mono text-xs font-semibold leading-tight text-foreground">
+                        {event.type}
                       </span>
                       <span className="text-sm text-muted-foreground">
-                        · {event.serviceName}
+                        · {serviceLabel}
                       </span>
                     </div>
                     <time
                       className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground"
-                      dateTime={event.at}
+                      dateTime={event.timestamp}
                     >
-                      {formatEventTime(event.at)}
+                      {formatEventTime(event.timestamp)}
                     </time>
                   </div>
                 </div>

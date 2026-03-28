@@ -6,10 +6,9 @@ import {
 } from "recharts"
 
 import { cn } from "@/lib/utils"
+import { useDashboardStore } from "@/store/useDashboardStore"
 
 export type AnomalyGaugeProps = {
-  /** Anomaly level 0–100 (%). */
-  percentage: number
   /** Omit outer title block when nested (e.g. incident flow step). */
   embedded?: boolean
   className?: string
@@ -29,11 +28,14 @@ function colorForPercentage(pct: number): string {
 const CHART_DATA_KEY = "value"
 
 export function AnomalyGauge({
-  percentage,
   embedded = false,
   className,
 }: AnomalyGaugeProps) {
-  const pct = clampPct(percentage)
+  const systemStatus = useDashboardStore((s) => s.systemStatus)
+  const score = systemStatus?.anomaly_score
+  const pct = clampPct(
+    typeof score === "number" ? score : Number.NaN,
+  )
   const barColor = colorForPercentage(pct)
   const isCritical = pct > 70
   const data = [{ name: "anomaly", [CHART_DATA_KEY]: pct, fill: barColor }]

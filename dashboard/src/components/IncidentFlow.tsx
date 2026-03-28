@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react"
 import { ChevronDown } from "lucide-react"
+import { motion } from "framer-motion"
 import type { ReactNode } from "react"
 import { useCallback, useState } from "react"
 
@@ -74,12 +75,15 @@ export function IncidentFlow({
           const isLast = index === steps.length - 1
 
           return (
-            <li
+            <motion.li
               key={step.id}
-              className={cn(
-                "animate-flow-step-in opacity-0 [animation-fill-mode:forwards]",
-              )}
-              style={{ animationDelay: `${index * 70}ms` }}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{
+                duration: 0.4,
+                delay: index * 0.06,
+                ease: "easeOut",
+              }}
             >
               <div className="flex items-stretch gap-5">
                 <div className="flex w-11 shrink-0 flex-col items-center">
@@ -165,7 +169,7 @@ export function IncidentFlow({
                   </div>
                 </div>
               </div>
-            </li>
+            </motion.li>
           )
         })}
       </ol>

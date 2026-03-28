@@ -37,36 +37,51 @@ function clamp01(n: number): number {
   return Math.min(1, Math.max(0, n))
 }
 
+/** Status-driven shell colors (CSS transitions only). */
+function getStatusClass(status: ServiceCardStatus): string {
+  if (status === "critical") {
+    return cn(
+      "border-red-400 bg-red-500/15",
+      "shadow-[0_0_15px_rgba(255,0,0,0.6)]",
+    )
+  }
+  if (status === "degraded") {
+    return "border-yellow-400 bg-yellow-500/15"
+  }
+  if (status === "recovering") {
+    return "border-sky-400 bg-sky-500/15"
+  }
+  return cn(
+    "border-green-400 bg-green-500/15",
+    "shadow-[0_0_10px_rgba(0,255,150,0.3)]",
+  )
+}
+
 const statusConfig: Record<
   ServiceCardStatus,
   {
     label: string
-    border: string
     labelClass: string
     barClass: string
   }
 > = {
   healthy: {
     label: "Healthy",
-    border: "border-l-2 border-l-emerald-500",
     labelClass: "text-emerald-400",
     barClass: "bg-emerald-500",
   },
   degraded: {
     label: "Degraded",
-    border: "border-l-2 border-l-amber-500",
     labelClass: "text-amber-400",
     barClass: "bg-amber-500",
   },
   critical: {
     label: "Critical",
-    border: "border-l-2 border-l-red-500",
     labelClass: "text-red-400",
     barClass: "bg-red-500",
   },
   recovering: {
     label: "Recovering",
-    border: "border-l-2 border-l-sky-500",
     labelClass: "text-sky-400",
     barClass: "bg-sky-500",
   },
@@ -101,15 +116,16 @@ export function ServiceCard({
   className,
 }: ServiceCardProps) {
   const cfg = statusConfig[status]
-  const isCritical = status === "critical"
   const pct = clamp01(anomaly_score) * 100
 
   return (
     <Card
       className={cn(
-        "premium-surface border border-white/[0.08] bg-card transition-[border-left-color,background-color,box-shadow,transform] duration-500 ease-smooth",
-        cfg.border,
-        isCritical && "animate-critical-glow",
+        "premium-surface h-full border-2 border-white/[0.08] bg-card/90 backdrop-blur-sm",
+        "transition-all duration-700 ease-in-out",
+        status === "critical" &&
+          "motion-safe:animate-pulse motion-reduce:animate-none",
+        getStatusClass(status),
         className,
       )}
     >
@@ -165,7 +181,7 @@ export function ServiceCard({
           <div className="rounded-md bg-muted/30 px-2 py-2 transition-[background-color,transform] duration-300 ease-out motion-safe:hover:bg-muted/45 motion-safe:hover:scale-[1.02] motion-reduce:hover:scale-100">
             <dt className="text-muted-foreground">Requests</dt>
             <dd className="mt-0.5 font-mono font-medium tabular-nums text-foreground">
-              {request_count.toLocaleString()}
+              {(request_count ?? 0).toLocaleString()}
             </dd>
           </div>
         </dl>
@@ -187,7 +203,7 @@ export function ServiceCard({
           >
             <div
               className={cn(
-                "h-full rounded-full transition-[width] duration-700 ease-smooth",
+                "h-full min-h-0 rounded-full transition-[width] duration-700 ease-in-out",
                 pct > 0 && pct < 100 && status !== "healthy" && "progress-fill-shine",
                 cfg.barClass,
                 pct > 0 && "min-w-0.5",

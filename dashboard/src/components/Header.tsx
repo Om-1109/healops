@@ -1,31 +1,44 @@
 import { CheckCircle, Circle } from "lucide-react"
 
+import {
+  apiStatusToSystemStatus,
+  headerRootCauseDisplay,
+} from "@/lib/orchestratorViewMappers"
 import { cn } from "@/lib/utils"
 import { useDashboardStore } from "@/store/useDashboardStore"
 
 export type SystemStatus = "healthy" | "critical" | "degraded"
 
 export type HeaderProps = {
-  status?: SystemStatus
-  /** Display label next to live indicator, e.g. Healthy / Critical */
-  healthLabel?: string
-  /** Root cause summary from orchestrator */
-  rootCause?: string | null
   className?: string
 }
 
-export function Header({
-  status = "healthy",
-  healthLabel,
-  rootCause = null,
-  className,
-}: HeaderProps) {
+export function Header({ className }: HeaderProps) {
+  const systemStatus = useDashboardStore((s) => s.systemStatus)
+  const insights = useDashboardStore((s) => s.insights)
+  const currentIncident = useDashboardStore((s) => s.currentIncident)
   const mttr = useDashboardStore((s) => s.mttr)
-  const isCritical = status === "critical"
-  const isDegraded = status === "degraded"
-  const stateLabel =
-    healthLabel ??
-    (isCritical ? "Critical" : isDegraded ? "Degraded" : "Healthy")
+
+  const apiStatus = systemStatus?.status
+  const variant = apiStatusToSystemStatus(apiStatus)
+  const isCritical = variant === "critical"
+  const isDegraded = variant === "degraded"
+
+  const statusDisplay =
+    apiStatus != null && apiStatus.trim() !== ""
+      ? apiStatus.trim().toUpperCase()
+      : "—"
+
+  const rootCauseDisplay = headerRootCauseDisplay(
+    currentIncident,
+    insights,
+    systemStatus,
+  )
+
+  const autoFixDisplay =
+    systemStatus?.auto_fix != null && systemStatus.auto_fix !== ""
+      ? systemStatus.auto_fix
+      : "idle"
 
   return (
     <header
@@ -43,47 +56,51 @@ export function Header({
         <h1 className="bg-gradient-to-r from-foreground to-foreground/80 bg-clip-text text-xl font-bold tracking-[-0.03em] text-transparent sm:text-2xl">
           HealOps
         </h1>
-        <p className="mt-1.5 text-[13px] font-medium leading-snug text-muted-foreground">
-          Operations control — live reliability workspace
-        </p>
-        <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-1.5 text-[13px]">
-          <span
-            className={cn(
-              "rounded-md border px-2.5 py-1 text-xs font-semibold tracking-wide",
-              isCritical && "border-red-500/35 bg-red-500/10 text-red-200",
-              isDegraded &&
-                !isCritical &&
-                "border-amber-500/35 bg-amber-500/10 text-amber-100",
-              !isCritical && !isDegraded && "border-emerald-500/30 bg-emerald-500/10 text-emerald-100",
-            )}
-          >
-            {stateLabel}
-          </span>
-          <p className="min-w-0 text-muted-foreground">
-            <span className="font-medium text-foreground/80">Root cause:</span>{" "}
-            <span className="text-foreground">
-              {rootCause != null && rootCause.trim() !== ""
-                ? rootCause
-                : "—"}
-            </span>
-          </p>
-        </div>
+
+        <dl className="mt-3 grid gap-2.5 text-[13px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <dt className="sr-only">Status</dt>
+            <dd className="m-0">
+              <span
+                className={cn(
+                  "inline-block rounded-md border px-2.5 py-1 text-xs font-semibold tracking-wide",
+                  isCritical && "border-red-500/35 bg-red-500/10 text-red-200",
+                  isDegraded &&
+                    !isCritical &&
+                    "border-amber-500/35 bg-amber-500/10 text-amber-100",
+                  !isCritical &&
+                    !isDegraded &&
+                    "border-emerald-500/30 bg-emerald-500/10 text-emerald-100",
+                )}
+              >
+                {statusDisplay}
+              </span>
+            </dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="sr-only">Root cause</dt>
+            <dd className="m-0 text-foreground">{rootCauseDisplay}</dd>
+          </div>
+          <div className="min-w-0 font-mono text-xs text-muted-foreground">
+            <dt className="sr-only">Auto fix</dt>
+            <dd className="m-0 break-all">{autoFixDisplay}</dd>
+          </div>
+        </dl>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
-        <div className="flex items-center gap-2.5" title="Live telemetry">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/40 opacity-75 motion-reduce:animate-none" />
-            <Circle
-              className="relative size-2 fill-emerald-400 text-emerald-400"
-              strokeWidth={0}
-              aria-hidden
-            />
-          </span>
-          <span className="text-2xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-            Live
-          </span>
-        </div>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 sm:flex-col sm:items-end sm:gap-y-3">
+        <span
+          className="relative flex size-2 shrink-0"
+          title="Telemetry active"
+          aria-label="Telemetry active"
+        >
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/40 opacity-75 motion-reduce:animate-none" />
+          <Circle
+            className="relative size-2 fill-emerald-400 text-emerald-400"
+            strokeWidth={0}
+            aria-hidden
+          />
+        </span>
         <div
           className={cn(
             "max-w-[14rem] text-right text-[11px] font-medium tabular-nums tracking-tight",

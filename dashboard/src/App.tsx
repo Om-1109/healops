@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useShallow } from "zustand/react/shallow"
 
-import { autoFix, injectFailure } from "@/api/client"
+import { autoFix } from "@/api/client"
+import { ServiceVisualStatusProvider } from "@/context/ServiceVisualStatusContext"
 import { ActionBar } from "@/components/ActionBar"
 import { AnomalyGauge } from "@/components/AnomalyGauge"
 import { DashboardLayout } from "@/components/DashboardLayout"
+import { RemediationPanel } from "@/components/RemediationPanel"
 import { Header } from "@/components/Header"
 import { LogStream } from "@/components/LogStream"
 import { MetricsChart } from "@/components/MetricsChart"
@@ -12,20 +14,10 @@ import { RCAPanel } from "@/components/RCAPanel"
 import { ServiceDependencyGraph } from "@/components/ServiceDependencyGraph"
 import { SystemStatusBar } from "@/components/SystemStatusBar"
 import { Timeline } from "@/components/Timeline"
-import { SAMPLE_METRICS_DATA } from "@/data/sampleMetrics"
 import {
   apiStatusToSystemStatus,
-  formatHealthLabel,
-  formatRootCauseLabel,
-  insightsToRcaProps,
-  mapMetricsToChartData,
-  mapOrchestratorLogs,
-  mapOrchestratorTimeline,
+  headerRootCauseDisplay,
 } from "@/lib/orchestratorViewMappers"
-import {
-  monitoringLatenciesForInjectTarget,
-  monitoringStatusesForInjectTarget,
-} from "@/lib/serviceDependencyGraphDemo"
 import { useDashboardStore } from "@/store/useDashboardStore"
 import type { ActionBarStatus } from "@/types"
 
@@ -33,10 +25,9 @@ const RECOVERED_RESET_MS = 3_500
 
 function App() {
   const [actionStatus, setActionStatus] = useState<ActionBarStatus>("monitoring")
-  const [injectTarget, setInjectTarget] = useState("")
   const [injectPending, setInjectPending] = useState(false)
-  const [autoFixPending, setAutoFixPending] = useState(false)
   const recoveredTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const serviceChainRef = useRef<HTMLDivElement>(null)
 
   const clearRecoveredTimer = useCallback(() => {
     if (recoveredTimerRef.current != null) {
@@ -53,90 +44,76 @@ function App() {
     }, RECOVERED_RESET_MS)
   }, [clearRecoveredTimer])
 
-  const handleInjectFailure = useCallback(
-    async (service: string) => {
-      clearRecoveredTimer()
-      setInjectPending(true)
-      try {
-        await injectFailure(service, "simulated")
-        setActionStatus("monitoring")
-      } catch {
-        setActionStatus("monitoring")
-      } finally {
-        setInjectPending(false)
-      }
-    },
-    [clearRecoveredTimer],
-  )
+  const handleInjectFailure = useCallback(async () => {
+    clearRecoveredTimer()
+    setInjectPending(true)
+    try {
+      setActionStatus("monitoring")
+    } finally {
+      setInjectPending(false)
+    }
+  }, [clearRecoveredTimer])
 
   const handleAutoFix = useCallback(async () => {
     clearRecoveredTimer()
-    setAutoFixPending(true)
     setActionStatus("fixing")
     try {
-      await autoFix("payment_service")
+      const st = useDashboardStore.getState()
+      const target =
+        st.currentIncident?.service?.trim() ||
+        st.insights?.service?.trim() ||
+        st.servicesStatus?.services?.find((s) => s.status === "critical")
+          ?.name?.trim()
+      if (!target) {
+        setActionStatus("monitoring")
+        return
+      }
+      await autoFix(target)
+      await useDashboardStore.getState().refreshAll()
+      await useDashboardStore.getState().fetchServicesStatus()
       setActionStatus("recovered")
       scheduleMonitoringAfterRecovered()
     } catch {
       setActionStatus("monitoring")
-    } finally {
-      setAutoFixPending(false)
     }
   }, [clearRecoveredTimer, scheduleMonitoringAfterRecovered])
 
   useEffect(() => {
-    const {
-      fetchSystemStatus,
-      fetchInsights,
-      fetchTimeline,
-      fetchLogs,
-      fetchMetrics,
-    } = useDashboardStore.getState()
-
-    const runFetches = () => {
-      void fetchSystemStatus()
-      void fetchInsights()
-      void fetchTimeline()
-      void fetchLogs()
-      void fetchMetrics()
+    const syncSecondary = () => {
+      const st = useDashboardStore.getState()
+      void st.fetchServicesStatus()
+      void st.fetchLogs()
+      void st.fetchMetrics()
     }
 
-    runFetches()
+    const run = async () => {
+      await useDashboardStore.getState().refreshAll()
+      syncSecondary()
+    }
+
+    void run()
 
     const intervalId = setInterval(() => {
-      runFetches()
-    }, 3000)
+      void run()
+    }, 2000)
 
     return () => {
       clearInterval(intervalId)
     }
   }, [])
 
-  const { systemStatus, insights, timeline, logs, metrics } =
-    useDashboardStore(
-      useShallow((s) => ({
-        systemStatus: s.systemStatus,
-        insights: s.insights,
-        timeline: s.timeline,
-        logs: s.logs,
-        metrics: s.metrics,
-      })),
-    )
+  const { systemStatus, insights, currentIncident } = useDashboardStore(
+    useShallow((s) => ({
+      systemStatus: s.systemStatus,
+      insights: s.insights,
+      currentIncident: s.currentIncident,
+    })),
+  )
 
-  const headerRootCause = useMemo(() => {
-    if (systemStatus?.root_cause != null && systemStatus.root_cause !== "") {
-      return formatRootCauseLabel(systemStatus.root_cause)
-    }
-    if (insights?.service) {
-      return formatRootCauseLabel(insights.service)
-    }
-    return null
-  }, [systemStatus?.root_cause, insights?.service])
-
-  const statusBarRootCause = useMemo(() => {
-    const raw = systemStatus?.root_cause ?? insights?.service ?? ""
-    return formatRootCauseLabel(raw || null)
-  }, [systemStatus?.root_cause, insights?.service])
+  const statusBarRootCause = useMemo(
+    () => headerRootCauseDisplay(currentIncident, insights, systemStatus),
+    [currentIncident, insights, systemStatus],
+  )
 
   const apiStatus = systemStatus?.status
   const systemStatusVariant = useMemo(
@@ -144,73 +121,11 @@ function App() {
     [apiStatus],
   )
 
-  const timelineEvents = useMemo(
-    () => mapOrchestratorTimeline(timeline),
-    [timeline],
-  )
-
-  const logLines = useMemo(() => mapOrchestratorLogs(logs), [logs])
-
-  const chartData = useMemo(() => {
-    const mapped = mapMetricsToChartData(metrics)
-    return mapped.length > 0 ? mapped : SAMPLE_METRICS_DATA
-  }, [metrics])
-
-  const rcaProps = useMemo(() => insightsToRcaProps(insights), [insights])
-
-  const anomalyGaugePct = systemStatus?.anomaly_score ?? 0
-
-  const dependencyGraphProps = useMemo(() => {
-    if (actionStatus === "recovered") {
-      return {
-        statuses: {
-          api_gateway: "healthy" as const,
-          order_service: "healthy" as const,
-          payment_service: "healthy" as const,
-          inventory_service: "healthy" as const,
-        },
-        latenciesMs: {
-          api_gateway: 38,
-          order_service: 95,
-          payment_service: 88,
-          inventory_service: 72,
-        },
-      }
-    }
-    if (actionStatus === "fixing") {
-      return {
-        statuses: {
-          api_gateway: "healthy" as const,
-          order_service: "degraded" as const,
-          payment_service: "recovering" as const,
-          inventory_service: "healthy" as const,
-        },
-        latenciesMs: {
-          api_gateway: 40,
-          order_service: 450,
-          payment_service: 980,
-          inventory_service: 80,
-        },
-      }
-    }
-    if (injectTarget) {
-      return {
-        statuses: monitoringStatusesForInjectTarget(injectTarget),
-        latenciesMs: monitoringLatenciesForInjectTarget(injectTarget),
-      }
-    }
-    return {}
-  }, [actionStatus, injectTarget])
-
   return (
+    <ServiceVisualStatusProvider>
     <DashboardLayout
-      header={
-        <Header
-          status={systemStatusVariant}
-          healthLabel={formatHealthLabel(apiStatus)}
-          rootCause={headerRootCause}
-        />
-      }
+      serviceChainRef={serviceChainRef}
+      header={<Header />}
       topStatusBar={
         <SystemStatusBar
           systemStatus={systemStatusVariant}
@@ -218,30 +133,25 @@ function App() {
           autoFixState={actionStatus}
         />
       }
-      middleCenter={
-        <AnomalyGauge percentage={anomalyGaugePct} embedded />
-      }
-      middleRight={<RCAPanel embedded {...rcaProps} />}
-      metricsChart={<MetricsChart data={chartData} height={240} />}
-      timeline={<Timeline events={timelineEvents} staggerMs={75} />}
-      logStream={
-        <LogStream lines={logLines} compact />
-      }
-      serviceDependencyGraph={
-        <ServiceDependencyGraph height={300} {...dependencyGraphProps} />
+      middleCenter={<AnomalyGauge embedded />}
+      middleRight={<RCAPanel embedded />}
+      metricsChart={<MetricsChart height={240} />}
+      timeline={<Timeline staggerMs={75} />}
+      logStream={<LogStream compact />}
+      serviceDependencyGraph={<ServiceDependencyGraph height={300} />}
+      remediation={
+        <RemediationPanel embedded onTriggerAutoFix={handleAutoFix} />
       }
       actionBar={
         <ActionBar
           status={actionStatus}
-          injectTarget={injectTarget}
-          onInjectTargetChange={setInjectTarget}
+          chainRef={serviceChainRef}
           onInjectFailure={handleInjectFailure}
-          onTriggerAutoFix={handleAutoFix}
           injectPending={injectPending}
-          autoFixPending={autoFixPending}
         />
       }
     />
+    </ServiceVisualStatusProvider>
   )
 }
 

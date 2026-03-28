@@ -62,12 +62,24 @@ export type SystemStatusApi = {
   auto_fix: string
 }
 
-/** `GET /api/insights` */
+/** `GET /api/rca` (RCA only — not system-status `root_cause`) */
 export type InsightsApi = {
+  /** Empty when no RCA service identified yet */
   service: string
   confidence: number
   rca_text: string
   affected_services: string[]
+}
+
+/**
+ * Single source of truth for active incident (set only from GET /api/rca when `service` is present).
+ * Drives service chain + RCA panel; cleared ~5s after system becomes healthy.
+ */
+export type CurrentIncident = {
+  service: string
+  confidence: number
+  affected: string[]
+  rca_text: string
 }
 
 /** `GET /api/timeline` → `events[]` item */

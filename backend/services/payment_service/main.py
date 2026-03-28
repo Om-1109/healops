@@ -2,10 +2,18 @@ import asyncio
 import random
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 
 app = FastAPI(title="payment_service")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 FAIL_MODE = False
 
 
@@ -21,7 +29,12 @@ async def sim_state() -> dict:
 
 
 @app.api_route("/toggle-failure", methods=["GET", "POST"])
-async def toggle_failure() -> dict:
+async def toggle_failure(service: str | None = Query(default=None)) -> dict:
+    if service is not None and service != "payment_service":
+        raise HTTPException(
+            status_code=400,
+            detail="Query service must be payment_service for this host",
+        )
     global FAIL_MODE
     FAIL_MODE = not FAIL_MODE
     return {"service": "payment_service", "status": "ok", "fail_mode": FAIL_MODE}

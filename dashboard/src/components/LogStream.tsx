@@ -1,5 +1,6 @@
 import { Sparkles } from "lucide-react"
 import { useMemo, useRef, useState } from "react"
+import { useShallow } from "zustand/react/shallow"
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -10,13 +11,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  buildLogEventSummary,
-  formatServiceLabel,
-  inferServiceId,
-} from "@/lib/logStreamUtils"
+import { formatServiceLabel, inferServiceId } from "@/lib/logStreamUtils"
+import { mapOrchestratorLogs } from "@/lib/orchestratorViewMappers"
 import { cn } from "@/lib/utils"
-import type { LogLevel, LogLine } from "@/types"
+import { useDashboardStore } from "@/store/useDashboardStore"
+import type { LogLevel } from "@/types"
 
 export type { LogLevel, LogLine } from "@/types"
 
@@ -24,26 +23,6 @@ const levelRowBg: Record<LogLevel, string> = {
   ERROR: "bg-red-500/[0.06] hover:bg-red-500/[0.1]",
   WARN: "bg-yellow-500/[0.05] hover:bg-yellow-500/[0.09]",
   INFO: "bg-transparent hover:bg-muted/20",
-}
-
-/** Renders `**bold**` in summary bullets as strong. */
-function SummaryBullet({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g)
-  return (
-    <p className="text-xs leading-relaxed text-muted-foreground">
-      {parts.map((part, i) => {
-        const m = part.match(/^\*\*([^*]+)\*\*$/)
-        if (m) {
-          return (
-            <strong key={i} className="font-medium text-foreground">
-              {m[1]}
-            </strong>
-          )
-        }
-        return <span key={i}>{part}</span>
-      })}
-    </p>
-  )
 }
 
 type SeverityFilter = "all" | "errors-warns" | "errors"
@@ -55,22 +34,28 @@ function passesSeverity(level: LogLevel, f: SeverityFilter): boolean {
 }
 
 export type LogStreamProps = {
-  lines: LogLine[]
   className?: string
   compact?: boolean
   /** Show shimmer placeholders instead of log rows (e.g. while fetching). */
   loading?: boolean
-  /** Replace auto-generated “AI” summary bullets. */
-  summaryBullets?: string[]
 }
 
 export function LogStream({
-  lines,
   className,
   compact = false,
   loading = false,
-  summaryBullets: summaryOverride,
 }: LogStreamProps) {
+  const { systemStatus, currentIncident, insights, mttr, logs } =
+    useDashboardStore(
+      useShallow((s) => ({
+        systemStatus: s.systemStatus,
+        currentIncident: s.currentIncident,
+        insights: s.insights,
+        mttr: s.mttr,
+        logs: s.logs,
+      })),
+    )
+  const lines = useMemo(() => mapOrchestratorLogs(logs), [logs])
   const logRef = useRef<HTMLDivElement>(null)
   const [serviceFilter, setServiceFilter] = useState<string>("all")
   const [severityFilter, setSeverityFilter] =
@@ -81,10 +66,42 @@ export function LogStream({
     return [...set].sort((a, b) => a.localeCompare(b))
   }, [lines])
 
-  const summary = useMemo(
-    () => summaryOverride ?? buildLogEventSummary(lines),
-    [lines, summaryOverride],
-  )
+  const aiSummaryText = useMemo(() => {
+    const status = (systemStatus?.status ?? "unknown").toLowerCase()
+    const serviceRaw =
+      currentIncident?.service?.trim() ??
+      insights?.service?.trim() ??
+      null
+    const service = serviceRaw ? formatServiceLabel(serviceRaw) : null
+    const affected = Array.isArray(currentIncident?.affected)
+      ? currentIncident.affected.filter(
+          (s): s is string => typeof s === "string" && s.trim() !== "",
+        )
+      : Array.isArray(insights?.affected_services)
+        ? insights.affected_services.filter(
+            (s): s is string => typeof s === "string" && s.trim() !== "",
+          )
+        : []
+
+    let summary = "System operating normally."
+
+    if (status === "critical" && service) {
+      const impacted =
+        affected.length > 0
+          ? affected.map((s) => formatServiceLabel(s)).join(", ")
+          : "multiple services"
+      summary = `Failure detected in ${service}. Impacting ${impacted}. Auto-healing in progress.`
+    } else if (status === "critical") {
+      summary =
+        "Critical state detected. Impacting multiple services. Auto-healing in progress."
+    } else if (status === "healthy" && mttr && service) {
+      summary = `System recovered from ${service} in ${mttr}s. All services are stable.`
+    } else if (status === "healthy" && mttr) {
+      summary = `System recovered in ${mttr}s. All services are stable.`
+    }
+
+    return summary
+  }, [systemStatus, currentIncident, insights, mttr])
 
   const filtered = useMemo(() => {
     return lines.filter((l) => {
@@ -129,31 +146,26 @@ export function LogStream({
               AI Summary of Events
             </h3>
             <p className="text-[12px] leading-snug text-muted-foreground">
-              Plain-language readout — not a live LLM in this demo
+              Built from live insights, timeline, logs, recovery time, and system
+              status.
             </p>
           </div>
         </div>
-        <ul className="mt-3 space-y-2.5" aria-label="Event summary">
-          {loading
-            ? Array.from({ length: 3 }, (_, i) => (
-                <li key={i} className="flex gap-2">
-                  <Skeleton className="mt-1.5 size-1 shrink-0 rounded-full" />
-                  <div className="min-w-0 flex-1 space-y-1.5">
-                    <Skeleton className="h-3 w-full max-w-md" />
-                    <Skeleton className="h-3 w-4/5 max-w-sm opacity-80" />
-                  </div>
-                </li>
-              ))
-            : summary.map((s, i) => (
-                <li key={i} className="flex gap-2">
-                  <span
-                    className="mt-1.5 size-1 shrink-0 rounded-full bg-primary/70"
-                    aria-hidden
-                  />
-                  <SummaryBullet text={s} />
-                </li>
-              ))}
-        </ul>
+        <div className="mt-3" aria-label="Event summary">
+          {loading ? (
+            <div className="flex gap-2">
+              <Skeleton className="mt-1.5 size-1 shrink-0 rounded-full" />
+              <div className="min-w-0 flex-1 space-y-1.5">
+                <Skeleton className="h-3 w-full max-w-md" />
+                <Skeleton className="h-3 w-4/5 max-w-sm opacity-80" />
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {aiSummaryText}
+            </p>
+          )}
+        </div>
       </div>
 
       <div
@@ -248,23 +260,31 @@ export function LogStream({
           </div>
         ) : orderedLogs.length === 0 ? (
           <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-            No events match your filters.
+            {lines.length === 0
+              ? "No logs yet. Orchestrator output will appear here after events."
+              : "No events match your filters."}
           </p>
         ) : (
-          orderedLogs.map((log) => (
-            <div
-              key={`${log.at}::${inferServiceId(log)}::${log.message}`}
-              className={cn(
-                "border-b border-white/[0.06] px-4 py-2 text-sm leading-snug",
-                levelRowBg[log.level],
-                log.level === "ERROR" && "text-red-100/95",
-                log.level === "WARN" && "text-yellow-100/92",
-                log.level === "INFO" && "text-neutral-300",
-              )}
-            >
-              {log.message}
-            </div>
-          ))
+          orderedLogs.map((log) => {
+            const svc = formatServiceLabel(inferServiceId(log))
+            return (
+              <div
+                key={`${log.at}::${inferServiceId(log)}::${log.message}`}
+                className={cn(
+                  "border-b border-white/[0.06] px-4 py-2 text-sm leading-snug",
+                  levelRowBg[log.level],
+                  log.level === "ERROR" && "text-red-100/95",
+                  log.level === "WARN" && "text-yellow-100/92",
+                  log.level === "INFO" && "text-neutral-300",
+                )}
+              >
+                <span className="mr-2 font-mono text-[11px] font-semibold text-muted-foreground/90">
+                  [{svc}]
+                </span>
+                {log.message}
+              </div>
+            )
+          })
         )}
       </div>
     </div>

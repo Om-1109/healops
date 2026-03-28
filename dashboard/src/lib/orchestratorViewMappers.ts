@@ -1,14 +1,10 @@
 import { formatServiceLabel } from "@/lib/logStreamUtils"
 import type {
-  InsightsApi,
   LogLevel,
   LogLine,
   MetricsDatum,
   MetricsSeriesPoint,
   OrchestratorLogEntry,
-  OrchestratorTimelineEvent,
-  TimelineEvent,
-  TimelineEventType,
 } from "@/types"
 
 /** Header / status bar: API `status` → display label */
@@ -42,30 +38,23 @@ export function formatRootCauseLabel(
   return t
 }
 
-const EVENT_TYPE_TO_ICON: Record<string, TimelineEventType> = {
-  failure_injected: "alert",
-  anomaly_detected: "anomaly",
-  remediation_started: "fix",
-  remediation_complete: "success",
-}
-
-function humanizeEventType(type: string): string {
-  return type
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ")
-}
-
-export function mapOrchestratorTimeline(
-  events: OrchestratorTimelineEvent[],
-): TimelineEvent[] {
-  return events.map((e, index) => ({
-    id: `${e.timestamp}-${index}-${e.type}`,
-    type: EVENT_TYPE_TO_ICON[e.type] ?? "anomaly",
-    serviceName: e.service ? formatServiceLabel(e.service) : "System",
-    description: humanizeEventType(e.type),
-    at: e.timestamp,
-  }))
+/**
+ * Header / status bar root cause: `currentIncident.service` first, then `insights.service`, else critical → Detecting….
+ */
+export function headerRootCauseDisplay(
+  currentIncident: { service?: string } | null,
+  insights: { service?: string } | null,
+  systemStatus: { status?: string } | null | undefined,
+): string {
+  const svc =
+    currentIncident?.service?.trim() || insights?.service?.trim()
+  if (svc) {
+    return formatRootCauseLabel(svc)
+  }
+  if (systemStatus?.status?.toLowerCase() === "critical") {
+    return "Detecting..."
+  }
+  return "—"
 }
 
 export function normalizeLogLevel(raw: string): LogLevel {
@@ -95,33 +84,4 @@ export function mapMetricsToChartData(
     latency: p.latency,
     error_rate: p.error_rate,
   }))
-}
-
-export function insightsToRcaProps(insights: InsightsApi | null) {
-  if (!insights) {
-    return {
-      serviceName: "—",
-      failureType: "—",
-      affectedServices: [] as string[],
-      explanation: "Connect to the orchestrator to load insights.",
-      confidencePercent: 0,
-      emphasizedTerms: [] as string[],
-    }
-  }
-  const aff = insights.affected_services.map((s) => formatServiceLabel(s))
-  return {
-    serviceName: formatServiceLabel(insights.service),
-    failureType: "Active incident",
-    affectedServices: aff,
-    explanation: insights.rca_text,
-    confidencePercent: Math.min(
-      100,
-      Math.max(0, Math.round(insights.confidence * 100)),
-    ),
-    emphasizedTerms: [
-      ...aff,
-      formatServiceLabel(insights.service),
-      "downstream",
-    ],
-  }
 }

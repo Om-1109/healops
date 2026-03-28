@@ -1,4 +1,5 @@
 import { useMemo } from "react"
+import { useShallow } from "zustand/react/shallow"
 import {
   Area,
   CartesianGrid,
@@ -14,7 +15,9 @@ import {
 } from "recharts"
 import type { TooltipPayload } from "recharts"
 
+import { mapMetricsToChartData } from "@/lib/orchestratorViewMappers"
 import { cn } from "@/lib/utils"
+import { useDashboardStore } from "@/store/useDashboardStore"
 import type { MetricsDatum } from "@/types"
 
 export type { MetricsDatum } from "@/types"
@@ -217,7 +220,6 @@ function MetricsTooltip({
 }
 
 export type MetricsChartProps = {
-  data: MetricsDatum[]
   className?: string
   /** Chart height in px */
   height?: number
@@ -232,7 +234,6 @@ export type MetricsChartProps = {
 }
 
 export function MetricsChart({
-  data,
   className,
   height = 320,
   latencyWarnMs = 95,
@@ -240,6 +241,13 @@ export function MetricsChart({
   errorWarnPct = 0.38,
   errorCritPct = 1.0,
 }: MetricsChartProps) {
+  const metrics = useDashboardStore(useShallow((s) => s.metrics))
+
+  const data = useMemo(
+    () => mapMetricsToChartData(metrics),
+    [metrics],
+  )
+
   const enriched = useMemo(
     () => enrichData(data, latencyWarnMs, errorWarnPct),
     [data, latencyWarnMs, errorWarnPct],
@@ -248,12 +256,37 @@ export function MetricsChart({
   const latencyPeaks = enriched.filter((d) => d.latPeak)
   const errorPeaks = enriched.filter((d) => d.errPeak)
 
-  const maxLat = Math.max(...data.map((d) => d.latency), latencyCritMs) * 1.08
-  const maxErr = Math.max(...data.map((d) => d.error_rate), errorCritPct) * 1.12
+  const maxLat =
+    data.length > 0
+      ? Math.max(...data.map((d) => d.latency), latencyCritMs) * 1.08
+      : latencyCritMs
+  const maxErr =
+    data.length > 0
+      ? Math.max(...data.map((d) => d.error_rate), errorCritPct) * 1.12
+      : errorCritPct
+
+  if (data.length === 0) {
+    return (
+      <div
+        className={cn(
+          "flex w-full min-w-0 items-center justify-center rounded-lg border border-dashed border-border bg-muted/15 px-4 text-center",
+          className,
+        )}
+        style={{ height, minHeight: height }}
+      >
+        <p className="max-w-sm text-sm text-muted-foreground">
+          No metrics data yet. Polls will populate the chart from the orchestrator.
+        </p>
+      </div>
+    )
+  }
 
   return (
-    <div className={cn("w-full", className)}>
-      <ResponsiveContainer width="100%" height={height}>
+    <div
+      className={cn("w-full min-w-0", className)}
+      style={{ height }}
+    >
+      <ResponsiveContainer width="100%" height="100%">
         <ComposedChart
           data={enriched}
           margin={{ top: 10, right: 8, left: 0, bottom: 4 }}
@@ -466,9 +499,9 @@ export function MetricsChart({
             animationEasing="ease-in-out"
           />
 
-          {latencyPeaks.map((d) => (
+          {latencyPeaks.map((d, i) => (
             <ReferenceDot
-              key={`lat-peak-${d.label}`}
+              key={`lat-peak-${String(d.label)}-${i}`}
               x={d.label}
               y={d.latency}
               yAxisId="latency"
@@ -479,9 +512,9 @@ export function MetricsChart({
               ifOverflow="hidden"
             />
           ))}
-          {errorPeaks.map((d) => (
+          {errorPeaks.map((d, i) => (
             <ReferenceDot
-              key={`err-peak-${d.label}`}
+              key={`err-peak-${String(d.label)}-${i}`}
               x={d.label}
               y={d.error_rate}
               yAxisId="error"

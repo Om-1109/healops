@@ -1,4 +1,6 @@
 import { Loader2 } from "lucide-react"
+import type { RefObject } from "react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -9,6 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { orchestratorToggleFailure } from "@/api/client"
+import { useDashboardStore } from "@/store/useDashboardStore"
 import type { ActionBarStatus } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -18,40 +22,38 @@ export type InjectionTarget = {
 }
 
 const DEFAULT_INJECTION_TARGETS: InjectionTarget[] = [
-  { value: "payment_service", label: "Payment Service" },
   { value: "api_gateway", label: "API Gateway" },
   { value: "order_service", label: "Order Service" },
+  { value: "payment_service", label: "Payment Service" },
   { value: "inventory_service", label: "Inventory Service" },
 ]
 
 export type ActionBarProps = {
   status: ActionBarStatus
   /**
-   * Target for inject failure (controlled). Use empty string until the user
-   * picks a service — first selection runs inject.
+   * Called when the user picks a service so parents (e.g. graph demos) can sync.
    */
-  injectTarget: string
-  onInjectTargetChange: (value: string) => void
+  onSelectedServiceChange?: (service: string) => void
   injectionTargets?: InjectionTarget[]
+  /** POST toggle-failure on the selected microservice host. */
   onInjectFailure: (service: string) => void | Promise<void>
-  onTriggerAutoFix: () => void | Promise<void>
   injectPending?: boolean
-  autoFixPending?: boolean
+  /** Scrolls into view after inject (request chain section). */
+  chainRef?: RefObject<HTMLDivElement | null>
   className?: string
 }
 
 export function ActionBar({
   status: _statusForShell,
-  injectTarget,
-  onInjectTargetChange,
+  onSelectedServiceChange,
   injectionTargets = DEFAULT_INJECTION_TARGETS,
   onInjectFailure,
-  onTriggerAutoFix,
   injectPending = false,
-  autoFixPending = false,
+  chainRef,
   className,
 }: ActionBarProps) {
   void _statusForShell
+  const [selectedService, setSelectedService] = useState("api_gateway")
 
   return (
     <div
@@ -75,12 +77,10 @@ export function ActionBar({
             </div>
           ) : (
             <Select
-              value={injectTarget || undefined}
+              value={selectedService}
               onValueChange={(value) => {
-                onInjectTargetChange(value)
-                if (!injectPending && !autoFixPending) {
-                  void onInjectFailure(value)
-                }
+                setSelectedService(value)
+                onSelectedServiceChange?.(value)
               }}
             >
               <SelectTrigger
@@ -99,33 +99,48 @@ export function ActionBar({
               </SelectContent>
             </Select>
           )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-9 min-w-[9.5rem]"
+              disabled={!selectedService || injectPending}
+              onClick={async () => {
+                if (!selectedService) return
+                console.log("Injecting:", selectedService)
+                useDashboardStore.getState().beginInjectFailureTimer()
+                try {
+                  await orchestratorToggleFailure(selectedService)
+                } catch (err) {
+                  console.error("Inject request failed:", err)
+                }
+                await useDashboardStore.getState().refreshAll()
+                chainRef?.current?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "center",
+                })
+                void onInjectFailure(selectedService)
+              }}
+            >
+              {injectPending ? (
+                <>
+                  <Loader2
+                    className="size-4 animate-spin"
+                    strokeWidth={2}
+                    aria-hidden
+                  />
+                  Injecting…
+                </>
+              ) : (
+                "Inject failure"
+              )}
+            </Button>
+          </div>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Selecting a service triggers inject for that target.
+            Choose a service, then inject. The orchestrator toggles that
+            microservice and tracks it for RCA, timeline, and remediation.
           </p>
         </div>
-
-        <Button
-          type="button"
-          variant="default"
-          className="h-9 shrink-0 min-w-[9.5rem]"
-          disabled={injectPending || autoFixPending}
-          onClick={() => {
-            void onTriggerAutoFix()
-          }}
-        >
-          {autoFixPending ? (
-            <>
-              <Loader2
-                className="size-4 animate-spin"
-                strokeWidth={2}
-                aria-hidden
-              />
-              Fixing…
-            </>
-          ) : (
-            "Trigger Auto-Fix"
-          )}
-        </Button>
       </div>
     </div>
   )
